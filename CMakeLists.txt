@@ -22,7 +22,7 @@ message ("-- Configuring Greenbone Vulnerability Manager...")
 # VERSION: Set patch version for stable releases, e.g. "9.0.0",
 #          unset patch version for prereleases, e.g. "9.0"
 project (gvm
-         VERSION 20.4
+         VERSION 20.8
          LANGUAGES C)
 
 if (POLICY CMP0005)
@@ -112,13 +112,13 @@ include (CPack)
 
 ## Variables
 
-set (GVMD_DATABASE_VERSION 226)
+set (GVMD_DATABASE_VERSION 227)
 
 set (GVMD_SCAP_DATABASE_VERSION 16)
 
 set (GVMD_CERT_DATABASE_VERSION 6)
 
-set (GMP_VERSION "20.04")
+set (GMP_VERSION "20.08")
 
 if (SYSCONF_INSTALL_DIR)
   set (SYSCONFDIR "${SYSCONF_INSTALL_DIR}")
@@ -199,6 +199,11 @@ if (NOT GVM_RUN_DIR)
   set (GVM_RUN_DIR      "${LOCALSTATEDIR}/run")
 endif (NOT GVM_RUN_DIR)
 
+if (NOT GVM_FEED_LOCK_PATH)
+  set (GVM_FEED_LOCK_PATH "${GVM_RUN_DIR}/feed-update.lock")
+endif (NOT GVM_FEED_LOCK_PATH)
+add_definitions (-DGVM_FEED_LOCK_PATH="${GVM_FEED_LOCK_PATH}")
+
 # TODO: Once we separate the RFP signatures out of "plugins" and
 # into var/lib/gvm/rfpsigs/ (via a sync script) then we do not need
 # to know about the NVT_DIR anymore.
@@ -207,7 +212,7 @@ if (NOT GVM_NVT_DIR)
 endif (NOT GVM_NVT_DIR)
 
 if (NOT GVMD_FEED_DIR)
-  set (GVMD_FEED_DIR "${LOCALSTATEDIR}/lib/openvas/gvmd/${GMP_VERSION}")
+  set (GVMD_FEED_DIR "${LOCALSTATEDIR}/lib/gvm/gvmd/${GMP_VERSION}")
 endif (NOT GVMD_FEED_DIR)
 
 if (NOT GVM_ACCESS_KEY_DIR)
@@ -243,7 +248,6 @@ configure_file (src/gvmd_log_conf.cmake_in src/gvmd_log.conf)
 configure_file (src/schema_formats/XML/GMP.xml.in src/schema_formats/XML/GMP.xml @ONLY)
 configure_file (tools/greenbone-scapdata-sync.in tools/greenbone-scapdata-sync @ONLY)
 configure_file (tools/greenbone-certdata-sync.in tools/greenbone-certdata-sync @ONLY)
-configure_file (tools/gvm-portnames-update.in tools/gvm-portnames-update @ONLY)
 configure_file (tools/gvm-manage-certs.in tools/gvm-manage-certs @ONLY)
 
 ## Testing
@@ -379,10 +383,6 @@ install (FILES src/wizards/quick_first_scan.xml
          DESTINATION ${GVMD_DATA_DIR}/wizards/
          PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ)
 
-install (FILES tools/portnames_update.xsl
-         DESTINATION ${GVMD_DATA_DIR}/
-         PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ)
-
 install (FILES tools/cpe_getbyname.xsl tools/cve_getbyname.xsl
          tools/ovaldef_getbyname.xsl
          DESTINATION ${GVM_SCAP_RES_DIR}
@@ -391,11 +391,6 @@ install (FILES tools/cpe_getbyname.xsl tools/cve_getbyname.xsl
 install (FILES tools/cert_bund_getbyname.xsl tools/dfn_cert_getbyname.xsl
          DESTINATION ${GVM_CERT_RES_DIR}
          PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ)
-
-install (FILES ${CMAKE_BINARY_DIR}/tools/gvm-portnames-update
-         DESTINATION ${SBINDIR}
-         PERMISSIONS OWNER_EXECUTE OWNER_READ OWNER_WRITE
-                     GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
 
 install (FILES ${CMAKE_BINARY_DIR}/tools/greenbone-scapdata-sync
          DESTINATION ${SBINDIR}

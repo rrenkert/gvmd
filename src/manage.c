@@ -164,7 +164,10 @@
  */
 #define MAX_HOSTS_DEFAULT "20"
 
-extern volatile int termination_signal;
+/**
+ * @brief Path to the feed lock file
+ */
+static gchar *feed_lock_path = NULL;
 
 /**
  * @brief Path to the relay mapper executable, NULL to disable relays.
@@ -3206,15 +3209,15 @@ slave_setup (gvm_connection_t *connection, const char *name, task_t task,
  *         task name.
  */
 static int
-handle_slave_task (task_t task, target_t target,
-                   credential_t target_ssh_credential,
-                   credential_t target_smb_credential,
-                   credential_t target_esxi_credential,
-                   credential_t target_snmp_credential,
-                   report_t last_stopped_report,
-                   gvm_connection_t *connection,
-                   const gchar *slave_id,
-                   const gchar *slave_name)
+handle_gmp_slave_task (task_t task, target_t target,
+                       credential_t target_ssh_credential,
+                       credential_t target_smb_credential,
+                       credential_t target_esxi_credential,
+                       credential_t target_snmp_credential,
+                       report_t last_stopped_report,
+                       gvm_connection_t *connection,
+                       const gchar *slave_id,
+                       const gchar *slave_name)
 {
   char *name, *uuid;
   int ret;
@@ -3279,17 +3282,9 @@ handle_slave_task (task_t task, target_t target,
       }
     else
       {
-        int current_signal = get_termination_signal ();
         if ((task_run_status (task) == TASK_STATUS_STOP_REQUESTED_GIVEUP)
-            || (task_run_status (task) == TASK_STATUS_STOP_REQUESTED)
-            || current_signal)
+            || (task_run_status (task) == TASK_STATUS_STOP_REQUESTED))
           {
-            if (current_signal)
-              {
-                g_debug ("%s: Received %s signal.",
-                         __func__,
-                         sys_siglist[get_termination_signal()]);
-              }
             if (global_current_report)
               {
                 set_report_scan_run_status (global_current_report,
@@ -3306,21 +3301,6 @@ handle_slave_task (task_t task, target_t target,
 
   while (1)
     {
-      if (get_termination_signal ())
-        {
-          g_debug ("%s: Received %s signal.",
-                   __func__,
-                   sys_siglist[get_termination_signal()]);
-          if (global_current_report)
-            {
-              set_report_scan_run_status (global_current_report,
-                                          TASK_STATUS_STOPPED);
-            }
-          set_task_run_status (task, TASK_STATUS_STOPPED);
-          g_free (slave_task_name);
-          return 0;
-        }
-
       ret = slave_setup (connection, slave_task_name,
                          task, target, target_ssh_credential,
                          target_smb_credential, target_esxi_credential,
@@ -3578,7 +3558,7 @@ handle_osp_scan (task_t task, report_t report, const char *scan_id)
   while (1)
     {
       char *report_xml = NULL;
-      int run_status;
+      int run_status, progress;
       osp_scan_status_t osp_scan_status;
 
       run_status = task_run_status (task);
@@ -3588,8 +3568,9 @@ handle_osp_scan (task_t task, report_t report, const char *scan_id)
           rc = -2;
           break;
         }
-      int progress = get_osp_scan_report (scan_id, host, port, ca_pub, key_pub,
-                                          key_priv, 0, 0, &report_xml);
+
+      progress = get_osp_scan_report (scan_id, host, port, ca_pub, key_pub,
+                                      key_priv, 0, 0, &report_xml);
       if (progress < 0 || progress > 100)
         {
           result_t result = make_osp_result
@@ -4067,6 +4048,56 @@ prepare_osp_scan_for_resume (task_t task, const char *scan_id, char **error)
 }
 
 /**
+ * @brief Add OSP preferences for limiting ifaces and hosts for users.
+ *
+ * @param[in]  scanner_options  The scanner preferences table to add to.
+ */
+static void
+add_user_scan_preferences (GHashTable *scanner_options)
+{
+  gchar *hosts, *ifaces, *name;
+  int hosts_allow, ifaces_allow;
+
+  // Limit access to hosts
+  hosts = user_hosts (current_credentials.uuid);
+  hosts_allow = user_hosts_allow (current_credentials.uuid);
+
+  if (hosts_allow == 1)
+    name = g_strdup ("hosts_allow");
+  else if (hosts_allow == 0)
+    name = g_strdup ("hosts_deny");
+  else
+    name = NULL;
+
+  if (name
+      && (hosts_allow || (hosts && strlen (hosts))))
+    g_hash_table_replace (scanner_options,
+                          name,
+                          hosts ? hosts : g_strdup (""));
+  else
+    g_free (hosts);
+
+  // Limit access to ifaces
+  ifaces = user_ifaces (current_credentials.uuid);
+  ifaces_allow = user_ifaces_allow (current_credentials.uuid);
+
+  if (ifaces_allow == 1)
+    name = g_strdup ("ifaces_allow");
+  else if (ifaces_allow == 0)
+    name = g_strdup ("ifaces_deny");
+  else
+    name = NULL;
+
+  if (name
+      && (ifaces_allow || (ifaces && strlen (ifaces))))
+    g_hash_table_replace (scanner_options,
+                          name,
+                          ifaces ? ifaces : g_strdup (""));
+  else
+    g_free (ifaces);
+}
+
+/**
  * @brief Launch an OpenVAS via OSP task.
  *
  * @param[in]   task        The task.
@@ -4090,6 +4121,7 @@ launch_osp_openvas_task (task_t task, target_t target, const char *scan_id,
   GHashTable *vts_hash_table;
   osp_credential_t *ssh_credential, *smb_credential, *esxi_credential;
   osp_credential_t *snmp_credential;
+  gchar *max_checks, *max_hosts, *source_iface, *hosts_ordering;
   GHashTable *scanner_options;
   int ret;
   config_t config;
@@ -4195,6 +4227,28 @@ launch_osp_openvas_task (task_t task, target_t target, const char *scan_id,
                                 g_strdup (osp_value));
         }
     }
+
+  /* Setup user-specific scanner preference */
+  add_user_scan_preferences (scanner_options);
+
+  /* Setup general task preferences */
+  max_checks = task_preference_value (task, "max_checks");
+  g_hash_table_insert (scanner_options, g_strdup ("max_checks"),
+                       max_checks ? max_checks : g_strdup (MAX_CHECKS_DEFAULT));
+
+  max_hosts = task_preference_value (task, "max_hosts");
+  g_hash_table_insert (scanner_options, g_strdup ("max_hosts"),
+                       max_hosts ? max_hosts : g_strdup (MAX_HOSTS_DEFAULT));
+
+  source_iface = task_preference_value (task, "source_iface");
+  if (source_iface)
+    g_hash_table_insert (scanner_options, g_strdup ("source_iface"),
+                        source_iface);
+
+  hosts_ordering = task_hosts_ordering (task);
+  if (hosts_ordering)
+    g_hash_table_insert (scanner_options, g_strdup ("hosts_ordering"),
+                         hosts_ordering);
 
   /* Setup vulnerability tests (without preferences) */
   vts = NULL;
@@ -5087,10 +5141,10 @@ run_gmp_slave_task (task_t task, int from, char **report_id,
   free (uuid);
   proctitle_set (title);
 
-  switch (handle_slave_task (task, target, ssh_credential, smb_credential,
-                             esxi_credential, snmp_credential,
-                             last_stopped_report, connection, slave_id,
-                             slave_name))
+  switch (handle_gmp_slave_task (task, target, ssh_credential, smb_credential,
+                                 esxi_credential, snmp_credential,
+                                 last_stopped_report, connection, slave_id,
+                                 slave_name))
     {
       case 0:
         break;
@@ -7063,14 +7117,28 @@ scheduled_task_start (scheduled_task_t *scheduled_task,
                                 scheduled_task->task_uuid,
                                 NULL))
     {
-      if (gmp_start_task_report_c (&connection,
-                                   scheduled_task->task_uuid,
-                                   NULL))
+      gmp_start_task_opts_t opts;
+
+      opts = gmp_start_task_opts_defaults;
+      opts.task_id = scheduled_task->task_uuid;
+
+      switch (gmp_start_task_ext_c (&connection, opts))
         {
-          g_warning ("%s: gmp_start_task and gmp_resume_task failed", __func__);
-          scheduled_task_free (scheduled_task);
-          gvm_connection_free (&connection);
-          exit (EXIT_FAILURE);
+          case 0:
+            break;
+
+          case 99:
+            g_warning ("%s: user denied permission to start task", __func__);
+            scheduled_task_free (scheduled_task);
+            gvm_connection_free (&connection);
+            /* Return success, so that parent stops trying to start the task. */
+            exit (EXIT_SUCCESS);
+
+          default:
+            g_warning ("%s: gmp_start_task and gmp_resume_task failed", __func__);
+            scheduled_task_free (scheduled_task);
+            gvm_connection_free (&connection);
+            exit (EXIT_FAILURE);
         }
     }
 
@@ -8212,6 +8280,119 @@ sort_data_free (sort_data_t *sort_data)
 /* Feeds. */
 
 /**
+ * @brief Get the feed lock file path.
+ *
+ * @return The current path to the lock file.
+ */
+const gchar *
+get_feed_lock_path ()
+{
+  return feed_lock_path;
+}
+
+/**
+ * @brief Set the feed lock file path.
+ *
+ * @param new_path The new path to the lock file.
+ */
+void
+set_feed_lock_path (const char *new_path)
+{
+  g_free (feed_lock_path);
+  if (new_path && strcmp (new_path, ""))
+    feed_lock_path = g_strdup (new_path);
+  else
+    feed_lock_path = g_strdup (GVM_FEED_LOCK_PATH);
+}
+
+/**
+ * @brief Write start time to sync lock file.
+ *
+ * @param[in]  lockfile_fd  File descriptor of the lock file.
+ */
+void
+write_sync_start (int lockfile_fd)
+{
+  time_t now;
+  char *now_string;
+
+  now = time (NULL);
+  now_string = ctime (&now);
+  while (*now_string)
+    {
+      ssize_t count;
+      count = write (lockfile_fd,
+                     now_string,
+                     strlen (now_string));
+      if (count < 0)
+        {
+          if (errno == EAGAIN || errno == EINTR)
+            /* Interrupted, try write again. */
+            continue;
+          g_warning ("%s: failed to write to lockfile: %s",
+                     __func__,
+                     strerror (errno));
+          break;
+        }
+      now_string += count;
+    }
+}
+
+/**
+ * @brief Acquires the feed lock and writes the current time to the lockfile.
+ *
+ * @param[out] lockfile   Lockfile data struct.
+ *
+ * @return 0 success, 1 already locked, -1 error
+ */
+int
+feed_lockfile_lock (lockfile_t *lockfile)
+{
+  int ret;
+
+  /* Try to lock the file */
+  ret = lockfile_lock_path_nb (lockfile, get_feed_lock_path ());
+  if (ret)
+    {
+      return ret;
+    }
+
+  /* Write the file contents (timestamp) */
+  write_sync_start (lockfile->fd);
+
+  return 0;
+}
+
+/**
+ * @brief Releases the feed lock and clears the contents.
+ *
+ * @param[in] lockfile   Lockfile data struct.
+ *
+ * @return 0 success, -1 error
+ */
+int
+feed_lockfile_unlock (lockfile_t *lockfile)
+{
+  int ret;
+
+  /* Clear timestamp from lock file. */
+  if (ftruncate (lockfile->fd, 0))
+    g_warning ("%s: failed to ftruncate lockfile: %s",
+               __func__,
+               strerror (errno));
+
+  /* Unlock the lockfile */
+  ret = lockfile_unlock (lockfile);
+  if (ret)
+    {
+      g_critical ("%s: Error releasing checking lock", __func__);
+      return -1;
+    }
+
+  return 0;
+}
+
+/**
  * @brief Request a feed synchronization script selftest.
  *
  * Ask a feed synchronization script to perform a selftest and report
@@ -8523,70 +8704,27 @@ gvm_get_sync_script_feed_version (const gchar * sync_script,
 int
 gvm_migrate_secinfo (int feed_type)
 {
-  int lockfile, ret;
-  gchar *lockfile_name;
-  const gchar *lockfile_basename;
+  lockfile_t lockfile;
+  int ret;
 
-  if (feed_type == SCAP_FEED)
-    lockfile_basename = "gvm-sync-scap";
-  else if (feed_type == CERT_FEED)
-    lockfile_basename = "gvm-sync-cert";
-  else
+  if (feed_type != SCAP_FEED || feed_type != CERT_FEED)
     {
       g_warning ("%s: unsupported feed_type", __func__);
       return -1;
     }
 
-  /* Open the lock file. */
-
-  lockfile_name = g_build_filename (g_get_tmp_dir (), lockfile_basename, NULL);
-
-  lockfile = open (lockfile_name, O_RDWR | O_CREAT | O_APPEND,
-                   /* "-rw-r--r--" */
-                   S_IWUSR | S_IRUSR | S_IROTH | S_IRGRP);
-  if (lockfile == -1)
-    {
-      g_warning ("Failed to open lock file '%s': %s", lockfile_name,
-                 strerror (errno));
-      g_free (lockfile_name);
-      return -1;
-    }
-
-  if (flock (lockfile, LOCK_EX | LOCK_NB))  /* Exclusive, Non blocking. */
-    {
-      if (errno == EWOULDBLOCK)
-        {
-          if (close (lockfile))
-            g_warning ("%s: failed to close lockfile: %s",
-                       __func__,
-                       strerror (errno));
-          g_free (lockfile_name);
-          return 1;
-        }
-      g_debug ("%s: flock: %s", __func__, strerror (errno));
-      if (close (lockfile))
-        g_warning ("%s: failed to close lockfile: %s",
-                   __func__,
-                   strerror (errno));
-      g_free (lockfile_name);
-      return -1;
-    }
+  ret = feed_lockfile_lock (&lockfile);
+  if (ret == 1)
+    return 1;
+  else if (ret)
+    return -1;
 
   if (feed_type == SCAP_FEED)
     ret = check_scap_db_version ();
   else
     ret = check_cert_db_version ();
 
-  /* Close the lock file. */
-
-  if (close (lockfile))
-    {
-      g_free (lockfile_name);
-      g_warning ("Failed to close lock file: %s", strerror (errno));
-      return -1;
-    }
-
-  g_free (lockfile_name);
+  feed_lockfile_unlock (&lockfile);
 
   return ret;
 }
@@ -9218,17 +9356,6 @@ manage_run_wizard (const gchar *wizard_name,
   /* All the steps succeeded. */
 
   return 0;
-}
-
-/**
- * @brief Gets the last termination signal or 0.
- *
- * @return The last termination signal or 0 if there was none.
- */
-int
-get_termination_signal ()
-{
-  return termination_signal;
 }
 
 

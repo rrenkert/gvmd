@@ -348,12 +348,6 @@ static char*
 trash_filter_name (filter_t);
 
 static char*
-trash_target_hosts (target_t);
-
-static char*
-trash_target_exclude_hosts (target_t);
-
-static char*
 trash_target_comment (target_t);
 
 static int
@@ -5858,6 +5852,7 @@ aggregate_iterator_subgroup_value (iterator_t* iterator)
  *                               resource.
  * @param[in]  extra_where       Extra WHERE clauses.  Skipped for trash and
  *                               single resource.
+ * @param[in]  extra_with        Extra WITH clauses.
  * @param[in]  owned             Only count items owned by current user.
  *
  * @return Total number of resources in filtered set.
@@ -5865,8 +5860,9 @@ aggregate_iterator_subgroup_value (iterator_t* iterator)
 static int
 count2 (const char *type, const get_data_t *get, column_t *select_columns,
         column_t *trash_select_columns, column_t *where_columns,
-        column_t *trash_where_columns, const char **filter_columns, int distinct,
-        const char *extra_tables, const char *extra_where, int owned)
+        column_t *trash_where_columns, const char **filter_columns,
+        int distinct, const char *extra_tables, const char *extra_where,
+        const char *extra_with, int owned)
 {
   int ret;
   gchar *clause, *owned_clause, *owner_filter, *columns, *filter, *with;
@@ -5897,6 +5893,20 @@ count2 (const char *type, const get_data_t *get, column_t *select_columns,
 
   owned_clause = acl_where_owned (type, get, owned, owner_filter, 0,
                                   permissions, &with);
+
+  if (extra_with)
+    {
+      if (with)
+        {
+          gchar *old_with;
+
+          old_with = with;
+          with = g_strdup_printf ("%s, %s", old_with, extra_with);
+          g_free (old_with);
+        }
+      else
+        with = g_strdup_printf ("WITH %s", extra_with);
+    }
 
   g_free (owner_filter);
   array_free (permissions);
@@ -5965,7 +5975,8 @@ count (const char *type, const get_data_t *get, column_t *select_columns,
        int owned)
 {
   return count2 (type, get, select_columns, trash_select_columns, NULL, NULL,
-                 filter_columns, distinct, extra_tables, extra_where, owned);
+                 filter_columns, distinct, extra_tables, extra_where, NULL,
+                 owned);
 }
 
 /**
@@ -6101,64 +6112,6 @@ manage_cert_db_version ()
       return number;
     }
   return -1;
-}
-
-/**
- * @brief Returns associated name for a tcp/ip port.
- *
- * @param   number      Port number to get name for.
- * @param   protocol    Protocol type of port.
- *
- * @return  associated name for port if found, NULL otherwise.
- */
-char *
-manage_port_name (int number, const char *protocol)
-{
-  if (protocol == NULL || number <= 0 || number > 65535)
-    return NULL;
-
-  return sql_string ("SELECT name FROM port_names"
-                     " WHERE number = %i AND protocol = '%s' LIMIT 1;",
-                     number, protocol);
-}
-
-/**
- * @brief Returns formatted port number, protocol and iana name from
- * @brief field in "number/proto" form.
- *
- * @param   field       Number/Protocol string.
- *
- * @return  Formatted port name string, NULL if error.
- */
-gchar *
-port_name_formatted (const char *field)
-{
-  int number;
-  char *protocol, *port_name;
-
-  if (field == NULL)
-    return NULL;
-
-  protocol = g_newa (char, strlen (field));
-
-  if (sscanf (field, "%i/%s",
-              &number, protocol)
-      != 2)
-    return g_strdup (field);
-
-  port_name = manage_port_name (number, protocol);
-  if (port_name)
-    {
-      char *formatted = g_strdup_printf
-                         ("%i/%s (IANA: %s)",
-                          number,
-                          protocol,
-                          port_name);
-      free (port_name);
-      return formatted;
-    }
-  else
-    return g_strdup (field);
 }
 
 /**
@@ -15788,7 +15741,6 @@ check_db_versions ()
 {
   char *database_version;
   int scap_db_version, cert_db_version;
-  long long int count;
 
   database_version = sql_string ("SELECT value FROM %s.meta"
                                  " WHERE name = 'database_version';",
@@ -15809,24 +15761,7 @@ check_db_versions ()
           return -2;
         }
       g_free (database_version);
-
-      /* Check that the database was initialised from the scanner.
-       *
-       * This can also fail after a migration, for example if the database
-       * was created before NVT preferences were cached in the database.
-       */
-
-      if (sql_int64 (&count,
-                     "SELECT count(*) FROM %s.meta"
-                     " WHERE name = 'nvts_feed_version'"
-                     " OR name = 'nvt_preferences_enabled';",
-                     sql_schema ())
-          || count < 2)
-        g_warning ("database must be initialised from scanner");
     }
-  else
-    /* Assume database is missing. */
-    g_warning ("database must be initialised from scanner");
 
   /* Check SCAP database version. */
 
@@ -17365,6 +17300,7 @@ task_count (const get_data_t *get)
                 extra_columns, 0,
                 extra_tables,
                 extra_where,
+                NULL,
                 TRUE);
 
   g_free (extra_tables);
@@ -21455,6 +21391,7 @@ report_count (const get_data_t *get)
                  : " AND (SELECT hidden FROM tasks"
                    "      WHERE tasks.id = task)"
                    "     = 0",
+                NULL,
                 TRUE);
 
   g_free (extra_tables);
@@ -23316,6 +23253,17 @@ cleanup_result_nvts ()
   iterator_t affected_iter;
   GArray *affected;
   int index;
+
+  g_debug ("%s: Cleaning up results with wrong nvt ids", __func__);
+  sql ("UPDATE results"
+       " SET nvt = (SELECT oid FROM nvts WHERE name = nvt),"
+       "     result_nvt = NULL"
+       " WHERE nvt IN (SELECT name FROM nvts WHERE name != oid);");
+
+  g_debug ("%s: Cleaning up result_nvts entries with wrong nvt ids",
+           __func__);
+  sql ("DELETE FROM result_nvts"
+       " WHERE nvt IN (SELECT name FROM nvts WHERE name != oid);");
 
   g_debug ("%s: Creating missing result_nvts entries", __func__);
   sql ("INSERT INTO result_nvts (nvt)"
@@ -26596,157 +26544,19 @@ print_report_port_xml (report_t report, FILE *out, const get_data_t *get,
 }
 
 /**
- * @brief Check whether the scan of a report is active.
- *
- * @param[in]  report         Report.
- *
- * @return 1 if active, else 0.
- */
-static int
-report_active (report_t report)
-{
-  task_status_t run_status;
-  report_scan_run_status (report, &run_status);
-  if (run_status == TASK_STATUS_REQUESTED
-      || run_status == TASK_STATUS_RUNNING
-      || run_status == TASK_STATUS_DELETE_REQUESTED
-      || run_status == TASK_STATUS_DELETE_ULTIMATE_REQUESTED
-      || run_status == TASK_STATUS_STOP_REQUESTED
-      || run_status == TASK_STATUS_STOP_REQUESTED_GIVEUP
-      || run_status == TASK_STATUS_STOPPED
-      || run_status == TASK_STATUS_INTERRUPTED)
-    return 1;
-  return 0;
-}
-
-/**
- * @brief Get progress for active report.
- *
- * @param[in]  report         Report.
- * @param[in]  maximum_hosts  Maximum number of hosts in target.
- * @param[out] hosts_xml      Return for hosts XML if required, else NULL.
- *
- * @return Progress XML.
- */
-static int
-report_progress_active (report_t report, long maximum_hosts, gchar **hosts_xml)
-{
-  long total = 0, num_hosts = 0, dead_hosts = 0;
-  int total_progress;
-  iterator_t hosts;
-  GString *string;
-
-  string = g_string_new ("");
-
-  init_report_host_iterator (&hosts, report, NULL, 0);
-  while (next (&hosts))
-    {
-      unsigned int max_port, current_port;
-      long progress;
-
-      max_port = host_iterator_max_port (&hosts);
-      current_port = host_iterator_current_port (&hosts);
-      if (max_port)
-        {
-          if (max_port == -1)
-            dead_hosts++;
-          progress = (current_port * 100) / max_port;
-          if (progress < 0) progress = 0;
-          else if (progress > 100) progress = 100;
-        }
-      else
-        progress = current_port ? 100 : 0;
-
-      total += progress;
-      num_hosts++;
-
-      if (hosts_xml)
-        g_string_append_printf (string,
-                                "<host_progress>"
-                                "<host>%s</host>"
-                                "%li"
-                                "</host_progress>",
-                                host_iterator_host (&hosts),
-                                progress);
-    }
-  cleanup_iterator (&hosts);
-
-  total_progress = (maximum_hosts - dead_hosts)
-                   ? (total / (maximum_hosts - dead_hosts)) : 0;
-
-#if 1
-  g_debug ("   total: %li", total);
-  g_debug ("   num_hosts: %li", num_hosts);
-  g_debug ("   maximum_hosts: %li", maximum_hosts);
-  g_debug ("   total_progress: %i", total_progress);
-#endif
-
-  if (total_progress == 0) total_progress = 1;
-  else if (total_progress == 100) total_progress = 99;
-
-  if (hosts_xml)
-    *hosts_xml = g_string_free (string, FALSE);
-  else
-    g_string_free (string, TRUE);
-
-  return total_progress;
-}
-
-/**
  * @brief Calculate the progress of a report.
  *
  * @param[in]  report     Report.
- * @param[in]  task       Report's task.
- * @param[out] hosts_xml  Return for hosts XML if required, else NULL.
  *
  * @return Progress.
  */
 int
-report_progress (report_t report, task_t task, gchar **hosts_xml)
+report_progress (report_t report)
 {
-  target_t target;
-  char *hosts, *exclude_hosts;
-  int progress;
-  long maximum_hosts;
-
   if (report == 0)
-    {
-      if (hosts_xml)
-        *hosts_xml = g_strdup ("");
-      return -1;
-    }
+    return -1;
 
-  /* Handles both slave and OSP cases. */
-  if ((progress = report_slave_progress (report)))
-    {
-      if (hosts_xml)
-        *hosts_xml = g_strdup ("");
-      return progress;
-    }
-
-  target = task_target (task);
-  if (task_target_in_trash (task))
-    {
-      hosts = target ? trash_target_hosts (target) : NULL;
-      exclude_hosts = target ? trash_target_exclude_hosts
-                                (target) : NULL;
-    }
-  else
-    {
-      hosts = target ? target_hosts (target) : NULL;
-      exclude_hosts = target ? target_exclude_hosts (target) : NULL;
-    }
-  maximum_hosts = hosts ? manage_count_hosts_max (hosts, exclude_hosts, 0) : 0;
-  g_free (hosts);
-  g_free (exclude_hosts);
-
-  if (report_active (report))
-    return report_progress_active (report, maximum_hosts, hosts_xml);
-
-  if (hosts_xml)
-    *hosts_xml = g_strdup ("");
-
-  return -1;
+  return report_slave_progress (report);
 }
 
 /**
@@ -28281,7 +28091,7 @@ print_report_xml_start (report_t report, report_t delta, task_t task,
       else
         {
           int progress;
-          progress = report_progress (report, task, NULL);
+          progress = report_progress (report);
           progress_xml = g_strdup_printf ("%i", progress);
         }
 
@@ -31069,39 +30879,45 @@ validate_port (const char *port)
 }
 
 /**
- * @brief Validate a single port.
+ * @brief Validate a single port, for use in override or note.
  *
- * May come in values such as 100/foo and 100/foo (IANA: bar).
- * Will also validate values such as: general/tcp.
- *
- * @param[in]   port      A port.
+ * @param[in]  port  A port.
  *
  * @return 0 success, 1 failed.
  */
 static int
 validate_results_port (const char *port)
 {
-  int num;
-  char *buff;
+  long int num;
+  char *end;
 
   if (!port)
     return 1;
 
-  if (g_str_has_prefix (port, "cpe:"))
+  /* "cpe:abc", "general/tcp", "20/udp"
+   *
+   * We keep the "general/tcp" case pretty open because it is not clearly
+   * restricted anywhere, and is already used with non-alphanumerics in
+   * "general/Host_Details".  We exclude whitespace, ',' and ';' to prevent
+   * users from entering lists of ports.
+   *
+   * Similarly, the CPE case forbids whitespace, but allows ',' and ';' as
+   * these may occur in valid CPEs. */
+  if (g_regex_match_simple
+       ("^(cpe:[^\\s]+|general/[^\\s,;]+|[0-9]+/[[:alnum:]]+)$",
+        port, 0, 0)
+      == FALSE)
+    return 1;
+
+  if (g_str_has_prefix (port, "cpe:")
+      || g_str_has_prefix (port, "general/"))
     return 0;
 
-  if (strncmp ("general/", port, 8) == 0)
+  num = strtol (port, &end, 10);
+  if (*end != '/')
+    return 1;
+  if (num > 0 && num <= 65535)
     return 0;
-
-  num = atoi (port);
-  if (num > 0 && num < 65535)
-    return 0;
-
-  buff = g_newa (char, strlen (port));
-  sscanf (port, "%s (%i/%s)", buff, &num, buff);
-  if (num > 0 && num < 65535)
-    return 0;
-
   return 1;
 }
 
@@ -32818,37 +32634,6 @@ target_reverse_lookup_unify (target_t target)
 {
   return sql_string ("SELECT reverse_lookup_unify FROM targets"
                      " WHERE id = %llu;", target);
-}
-
-/**
- * @brief Return the hosts associated with a trashcan target.
- *
- * @param[in]  target  Target.
- *
- * @return Newly allocated comma separated list of hosts if available,
- *         else NULL.
- */
-static char*
-trash_target_hosts (target_t target)
-{
-  return sql_string ("SELECT hosts FROM targets_trash WHERE id = %llu;",
-                     target);
-}
-
-/**
- * @brief Return the excluded hosts associated with a trashcan target.
- *
- * @param[in]  target  Target.
- *
- * @return Newly allocated comma separated list of excluded hosts if available,
- *         else NULL.
- */
-static char*
-trash_target_exclude_hosts (target_t target)
-{
-  return sql_string ("SELECT exclude_hosts FROM targets_trash"
-                     " WHERE id = %llu;",
-                     target);
 }
 
 /**
@@ -49450,7 +49235,7 @@ asset_host_count (const get_data_t *get)
   static column_t columns[] = HOST_ITERATOR_COLUMNS;
   static column_t where_columns[] = HOST_ITERATOR_WHERE_COLUMNS;
   return count2 ("host", get, columns, NULL, where_columns, NULL,
-                 filter_columns, 0, NULL, NULL, TRUE);
+                 filter_columns, 0, NULL, NULL, NULL, TRUE);
 }
 
 /**
@@ -49483,7 +49268,7 @@ asset_host_count (const get_data_t *get)
      KEYWORD_TYPE_STRING                                                      \
    },                                                                         \
    {                                                                          \
-     "(SELECT count (distinct host) FROM host_oss WHERE os = oss.id)",        \
+     "(SELECT count(*) FROM best_os_hosts WHERE cpe = oss.name)",             \
      "hosts",                                                                 \
      KEYWORD_TYPE_INTEGER                                                     \
    },                                                                         \
@@ -49554,6 +49339,33 @@ asset_host_count (const get_data_t *get)
  }
 
 /**
+ * @brief OS asset WITH clause for PostgreSQL
+ *
+ * This depends on non-standard (PostgreSQL 9.0+) "ORDER BY" clauses
+ * in aggregate functions to select latest detail id.
+ */
+#define ASSET_OS_WITH_POSTGRESQL                                              \
+  " best_os_hosts AS ("                                                       \
+  "  SELECT inner_cpes[1] AS cpe, host"                                       \
+  "    FROM (SELECT array_agg(value ORDER BY id DESC) AS inner_cpes, host"    \
+  "            FROM host_details WHERE name='best_os_cpe' GROUP BY host)"     \
+  "    AS inner_host_os_cpes"                                                 \
+  " )"
+
+/**
+ * @brief Get the extra WITH clause for OS assets.
+ *
+ * @return The extra WITH clause.
+ */
+const char *
+asset_os_extra_with ()
+{
+  static const char *with = ASSET_OS_WITH_POSTGRESQL;
+
+  return with;
+}
+
+/**
  * @brief Initialise an OS iterator.
  *
  * @param[in]  iterator    Iterator.
@@ -49565,28 +49377,36 @@ asset_host_count (const get_data_t *get)
 int
 init_asset_os_iterator (iterator_t *iterator, const get_data_t *get)
 {
+  int ret;
   static const char *filter_columns[] = OS_ITERATOR_FILTER_COLUMNS;
   static column_t columns[] = OS_ITERATOR_COLUMNS;
   static column_t where_columns[] = OS_ITERATOR_WHERE_COLUMNS;
+  const char *extra_with;
 
-  return init_get_iterator2 (iterator,
-                             "os",
-                             get,
-                             /* Columns. */
-                             columns,
-                             /* Columns for trashcan. */
-                             NULL,
-                             /* WHERE Columns. */
-                             where_columns,
-                             /* WHERE Columns for trashcan. */
-                             NULL,
-                             filter_columns,
-                             0,
-                             NULL,
-                             NULL,
-                             TRUE,
-                             FALSE,
-                             NULL);
+  extra_with = asset_os_extra_with ();
+
+  ret = init_get_iterator2_with (iterator,
+                                 "os",
+                                 get,
+                                 /* Columns. */
+                                 columns,
+                                 /* Columns for trashcan. */
+                                 NULL,
+                                 /* WHERE Columns. */
+                                 where_columns,
+                                 /* WHERE Columns for trashcan. */
+                                 NULL,
+                                 filter_columns,
+                                 0,
+                                 NULL,
+                                 NULL,
+                                 TRUE,
+                                 FALSE,
+                                 NULL,
+                                 extra_with,
+                                 0);
+
+  return ret;
 }
 
 /**
@@ -49656,8 +49476,15 @@ asset_os_count (const get_data_t *get)
   static const char *extra_columns[] = OS_ITERATOR_FILTER_COLUMNS;
   static column_t columns[] = OS_ITERATOR_COLUMNS;
   static column_t where_columns[] = OS_ITERATOR_WHERE_COLUMNS;
-  return count2 ("os", get, columns, NULL, where_columns, NULL,
-                 extra_columns, 0, 0, 0, TRUE);
+  const char *extra_with;
+  int ret;
+
+  extra_with = asset_os_extra_with ();
+
+  ret = count2 ("os", get, columns, NULL, where_columns, NULL,
+                extra_columns, 0, 0, 0, extra_with, TRUE);
+
+  return ret;
 }
 
 /**
@@ -56319,6 +56146,21 @@ type_extra_where (const char *type, int trash, const char *filter,
 }
 
 /**
+ * @brief Get the extra WITH clauses for a resource type.
+ *
+ * @param[in]  type  The resource type.
+ *
+ * @return The extra WITH clauses.
+ */
+static const char *
+type_extra_with (const char *type)
+{
+  if (strcmp (type, "os") == 0)
+    return asset_os_extra_with ();
+  return NULL;
+}
+
+/**
  * @brief Builds a filtered SELECT statement for a certain type.
  *
  * @param[in]  type               Resource type
@@ -56347,6 +56189,7 @@ type_build_select (const char *type, const char *columns_str,
   int first, max;
   gchar *owned_clause, *owner_filter;
   array_t *permissions;
+  const char *extra_with;
 
   column_t *select_columns, *where_columns;
   const char **filter_columns;
@@ -56408,6 +56251,21 @@ type_build_select (const char *type, const char *columns_str,
                                           sql_select_limit (max),
                                           first);
 
+  extra_with = type_extra_with (type);
+
+  if (extra_with)
+    {
+      if (with)
+        {
+          gchar *old_with;
+
+          old_with = with;
+          with = g_strdup_printf ("%s, %s", old_with, extra_with);
+          g_free (old_with);
+        }
+      else
+        with = g_strdup_printf ("WITH %s", extra_with);
+    }
 
   *select = g_strdup_printf
              ("%s"           // WITH
@@ -56962,38 +56820,17 @@ manage_optimize (GSList *log_config, const gchar *database, const gchar *name)
     }
   else if (strcasecmp (name, "cleanup-result-encoding") == 0)
     {
-      iterator_t results;
-
       sql_begin_immediate ();
 
       g_debug ("%s: Stripping control chars out of result descriptions",
                __func__);
 
-      init_iterator (&results,
-                     "SELECT id, description FROM results;");
-      while (next (&results))
-        {
-          const char *descr;
-
-          descr = iterator_string (&results, 1);
-          if (descr)
-            {
-              gchar *copy, *quoted_descr;
-
-              copy = g_strdup (descr);
-
-              blank_control_chars (copy);
-
-              quoted_descr = sql_quote (copy);
-              g_free (copy);
-              sql ("UPDATE results SET description = '%s' WHERE id = %llu;",
-                   quoted_descr,
-                   iterator_int64 (&results, 0));
-              g_free (quoted_descr);
-            }
-        }
-      cleanup_iterator (&results);
-
+      sql ("UPDATE results"
+           " SET description = regexp_replace (description,"
+           "                                   '[\x01-\x09\xB-\x1F]',"
+           "                                   ' ',"
+           "                                   'g')"
+           " WHERE description ~ '[\x01-\x09\xB-\x1F]';");
 
       sql_commit ();
 

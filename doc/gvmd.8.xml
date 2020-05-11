@@ -132,6 +132,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       </optdesc>
     </option>
     <option>
+      <p><opt>--feed-lock-path=<arg>PATH</arg></opt></p>
+      <optdesc>
+        <p>Sets the path to the feed lock file.</p>
+      </optdesc>
+    </option>
+    <option>
       <p><opt>-f, --foreground</opt></p>
       <optdesc>
         <p>Run in foreground.</p>
@@ -278,6 +284,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       <p><opt>--port2=<arg>NUMBER</arg></opt></p>
       <optdesc>
         <p>Use port number NUMBER for address 2.</p>
+      </optdesc>
+    </option>
+    <option>
+      <p><opt>--rebuild-scap=<arg>TYPE</arg></opt></p>
+      <optdesc>
+        <p>
+          Rebuild SCAP data of type <arg>TYPE</arg>
+          (currently only supports 'ovaldefs').
+        </p>
       </optdesc>
     </option>
     <option>

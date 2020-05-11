@@ -27,6 +27,7 @@
 #include "iterator.h"
 #include "manage_configs.h"
 #include "manage_get.h"
+#include "utils.h"
 
 #include <stdio.h>
 #include <glib.h>
@@ -209,14 +210,8 @@ manage_cert_db_supported_version ();
 int
 manage_cert_db_version ();
 
-char *
-port_name_formatted (const char *);
-
 void
 set_db_version (int version);
-
-char *
-manage_port_name (int, const char *);
 
 int
 manage_migrate (GSList*, const gchar*);
@@ -1062,22 +1057,32 @@ user_has_super (const char *, user_t);
 /**
  * @brief SQL list of LSC families.
  */
-#define LSC_FAMILY_LIST                  \
-  "'AIX Local Security Checks',"         \
-  " 'CentOS Local Security Checks',"     \
-  " 'Debian Local Security Checks',"     \
-  " 'Fedora Local Security Checks',"     \
-  " 'FreeBSD Local Security Checks',"    \
-  " 'Gentoo Local Security Checks',"     \
-  " 'HP-UX Local Security Checks',"      \
-  " 'Mac OS X Local Security Checks',"   \
-  " 'Mandrake Local Security Checks',"   \
-  " 'Red Hat Local Security Checks',"    \
-  " 'Solaris Local Security Checks',"    \
-  " 'SuSE Local Security Checks',"       \
-  " 'Ubuntu Local Security Checks',"     \
-  " 'Windows : Microsoft Bulletins',"    \
-  " 'Privilege escalation'"
+#define LSC_FAMILY_LIST                            \
+  "'AIX Local Security Checks',"                   \
+  " 'Amazon Linux Local Security Checks',"         \
+  " 'CentOS Local Security Checks',"               \
+  " 'Citrix Xenserver Local Security Checks',"     \
+  " 'Debian Local Security Checks',"               \
+  " 'F5 Local Security Checks',"                   \
+  " 'Fedora Local Security Checks',"               \
+  " 'FortiOS Local Security Checks',"              \
+  " 'FreeBSD Local Security Checks',"              \
+  " 'Gentoo Local Security Checks',"               \
+  " 'HP-UX Local Security Checks',"                \
+  " 'Huawei EulerOS Local Security Checks',"       \
+  " 'JunOS Local Security Checks',"                \
+  " 'Mac OS X Local Security Checks',"             \
+  " 'Mageia Linux Local Security Checks',"         \
+  " 'Mandrake Local Security Checks',"             \
+  " 'Oracle Linux Local Security Checks',"         \
+  " 'Palo Alto PAN-OS Local Security Checks',"     \
+  " 'Red Hat Local Security Checks',"              \
+  " 'Slackware Local Security Checks',"            \
+  " 'Solaris Local Security Checks',"              \
+  " 'SuSE Local Security Checks',"                 \
+  " 'VMware Local Security Checks',"               \
+  " 'Ubuntu Local Security Checks',"               \
+  " 'Windows : Microsoft Bulletins'"
 
 gboolean
 find_result_with_permission (const char*, result_t*, const char *);
@@ -1483,7 +1488,7 @@ void
 trim_partial_report (report_t);
 
 int
-report_progress (report_t, task_t, gchar **);
+report_progress (report_t);
 
 gchar *
 manage_report (report_t, report_t, const get_data_t *, report_format_t,
@@ -3661,6 +3666,21 @@ aggregate_iterator_subgroup_value (iterator_t*);
 #define SCAP_FEED 2
 #define CERT_FEED 3
 
+const gchar *
+get_feed_lock_path ();
+
+void
+set_feed_lock_path (const char *);
+
+void
+write_sync_start (int);
+
+int
+feed_lockfile_lock (lockfile_t *);
+
+int
+feed_lockfile_unlock (lockfile_t *);
+
 int
 gvm_migrate_secinfo (int);
 
@@ -3716,9 +3736,6 @@ manage_optimize (GSList *, const gchar *, const gchar *);
 
 
 /* Signal management */
-
-int
-get_termination_signal ();
 
 int
 sql_cancel ();

@@ -555,8 +555,14 @@ accept_and_maybe_fork (int server_socket, sigset_t *sigmask_current)
     }
   sockaddr_as_str (&addr, client_address);
 
-  /* Fork a child to serve the client. */
-  pid = fork ();
+  /* Fork a child to serve the client.
+   *
+   * Use the default handlers for termination signals in the child.  This
+   * is required because the child calls 'system' and 'g_spawn_sync' in many
+   * places.  As the child waits for the spawned command, the child will
+   * not return to any code that checks termination_signal, so the child
+   * can't use the signal handlers inherited from the main process. */
+  pid = fork_with_handlers ();
   switch (pid)
     {
       case 0:
@@ -643,8 +649,10 @@ fork_connection_internal (gvm_connection_t *client_connection,
   struct sigaction action;
   gchar *auth_uuid;
 
-  /* Fork a child to use as scheduler client and server. */
+  /* Fork a child to use as scheduler/event client and server. */
 
+  /* This must 'fork' and not 'fork_with_handlers' so that the next fork can
+   * decide about handlers. */
   pid = fork ();
   switch (pid)
     {
@@ -687,7 +695,10 @@ fork_connection_internal (gvm_connection_t *client_connection,
 
   is_parent = 0;
 
-  pid = fork ();
+  /* As with accept_and_maybe_fork, use the default handlers for termination
+   * signals in the child.  This is required for signals to work when the
+   * child is waiting for spawns and forks. */
+  pid = fork_with_handlers ();
   switch (pid)
     {
       case 0:
@@ -791,6 +802,17 @@ fork_connection_internal (gvm_connection_t *client_connection,
         /* This process is returned as the child of
          * fork_connection_for_scheduler so that the returned parent can wait
          * on this process. */
+
+        if (scheduler)
+          {
+            /* When used for scheduling this parent process waits for the
+             * child.  That means it does not use the loops which handle
+             * termination_signal.  So we need to use the regular handlers
+             * for termination signals. */
+            setup_signal_handler (SIGTERM, SIG_DFL, 0);
+            setup_signal_handler (SIGINT, SIG_DFL, 0);
+            setup_signal_handler (SIGQUIT, SIG_DFL, 0);
+          }
 
         /** @todo Give the parent time to prepare. */
         gvm_sleep (5);
@@ -896,65 +918,6 @@ cleanup ()
 
   /* Delete pidfile if this process is the parent. */
   if (is_parent == 1) pidfile_remove ("gvmd");
-}
-
-/**
- * @brief Setup signal handler.
- *
- * Exit on failure.
- *
- * @param[in]  signal   Signal.
- * @param[in]  handler  Handler.
- * @param[in]  block    Whether to block all other signals during handler.
- */
-static void
-setup_signal_handler (int signal, void (*handler) (int), int block)
-{
-  struct sigaction action;
-
-  memset (&action, '\0', sizeof (action));
-  if (block)
-    sigfillset (&action.sa_mask);
-  else
-    sigemptyset (&action.sa_mask);
-  action.sa_handler = handler;
-  if (sigaction (signal, &action, NULL) == -1)
-    {
-      g_critical ("%s: failed to register %s handler",
-                  __func__, sys_siglist[signal]);
-      exit (EXIT_FAILURE);
-    }
-}
-
-/**
- * @brief Setup signal handler.
- *
- * Exit on failure.
- *
- * @param[in]  signal   Signal.
- * @param[in]  handler  Handler.
- * @param[in]  block    Whether to block all other signals during handler.
- */
-static void
-setup_signal_handler_info (int signal,
-                           void (*handler) (int, siginfo_t *, void *),
-                           int block)
-{
-  struct sigaction action;
-
-  memset (&action, '\0', sizeof (action));
-  if (block)
-    sigfillset (&action.sa_mask);
-  else
-    sigemptyset (&action.sa_mask);
-  action.sa_flags |= SA_SIGINFO;
-  action.sa_sigaction = handler;
-  if (sigaction (signal, &action, NULL) == -1)
-    {
-      g_critical ("%s: failed to register %s handler",
-                  __func__, sys_siglist[signal]);
-      exit (EXIT_FAILURE);
-    }
 }
 
 #ifndef NDEBUG
@@ -1101,7 +1064,11 @@ update_nvt_cache_retry ()
   setup_signal_handler (SIGCHLD, SIG_DFL, 0);
   while (1)
     {
-      pid_t child_pid = fork ();
+      pid_t child_pid;
+
+      /* No need to worry about fork_with_handlers, because
+       * fork_update_nvt_cache already did that. */
+      child_pid = fork ();
       if (child_pid > 0)
         {
           int status, i;
@@ -1142,7 +1109,6 @@ update_nvt_cache_retry ()
     }
 }
 
-
 /**
  * @brief Update the NVT cache in a child process.
  *
@@ -1176,7 +1142,7 @@ fork_update_nvt_cache ()
       return -1;
     }
 
-  pid = fork ();
+  pid = fork_with_handlers ();
   switch (pid)
     {
       case 0:
@@ -1186,7 +1152,10 @@ fork_update_nvt_cache ()
 
         /* Clean up the process. */
 
-        pthread_sigmask (SIG_SETMASK, &sigmask_current, NULL);
+        if (sigmask_normal)
+          pthread_sigmask (SIG_SETMASK, sigmask_normal, NULL);
+        else
+          pthread_sigmask (SIG_SETMASK, &sigmask_current, NULL);
         /** @todo This should happen via gmp, maybe with "cleanup_gmp ();". */
         cleanup_manage_process (FALSE);
         if (manager_socket > -1) close (manager_socket);
@@ -1401,6 +1370,7 @@ manager_listen (const char *address_str_unix, const char *address_str_tls,
   if (address_str_unix)
     {
       struct stat state;
+      gchar *address_parent;
 
       /* UNIX file socket. */
 
@@ -1429,6 +1399,18 @@ manager_listen (const char *address_str_unix, const char *address_str_tls,
 
       address = (struct sockaddr *) &address_unix;
       address_size = sizeof (address_unix);
+
+      /* Ensure the path of the socket exists. */
+
+      address_parent = g_path_get_dirname (address_str_unix);
+      if (g_mkdir_with_parents (address_parent, 0755 /* "rwxr-xr-x" */))
+        {
+          g_warning ("%s: failed to create socket dir %s", __func__,
+                     address_parent);
+          g_free (address_parent);
+          return -1;
+        }
+      g_free (address_parent);
     }
   else if (address_str_tls)
     {
@@ -1650,9 +1632,11 @@ gvmd (int argc, char** argv)
   static gchar *rc_name = NULL;
   static gchar *relay_mapper = NULL;
   static gboolean rebuild = FALSE;
+  static gchar *rebuild_scap = NULL;
   static gchar *role = NULL;
   static gchar *disable = NULL;
   static gchar *value = NULL;
+  static gchar *feed_lock_path = NULL;
   GError *error = NULL;
   lockfile_t lockfile_checking, lockfile_serving;
   GOptionContext *option_context;
@@ -1717,6 +1701,10 @@ gvmd (int argc, char** argv)
           &encrypt_all_credentials,
           "(Re-)Encrypt all credentials.",
           NULL },
+        { "feed-lock-path", '\0', 0, G_OPTION_ARG_FILENAME,
+          &feed_lock_path,
+          "Sets the path to the feed lock file.",
+          "<path>" },
         { "foreground", 'f', 0, G_OPTION_ARG_NONE,
           &foreground,
           "Run in foreground.",
@@ -1823,6 +1811,11 @@ gvmd (int argc, char** argv)
           &rebuild,
           "Remove NVT db, and rebuild it from the scanner.",
           NULL },
+        { "rebuild-scap", '\0', 0, G_OPTION_ARG_STRING,
+          &rebuild_scap,
+          "Rebuild SCAP data of type <type>"
+          " (currently only supports 'ovaldefs').",
+          "<type>" },
         { "relay-mapper", '\0', 0, G_OPTION_ARG_FILENAME,
           &relay_mapper,
           "Executable for mapping scanner hosts to relays."
@@ -1954,6 +1947,9 @@ gvmd (int argc, char** argv)
     {
       client_watch_interval = 0;
     }
+
+  /* Set feed lock path */
+  set_feed_lock_path (feed_lock_path);
 
   /* Set schedule_timeout */
 
@@ -2267,6 +2263,25 @@ gvmd (int argc, char** argv)
       if (ret)
         {
           printf ("Failed to rebuild NVT cache.\n");
+          return EXIT_FAILURE;
+        }
+      return EXIT_SUCCESS;
+    }
+
+  if (rebuild_scap)
+    {
+      int ret;
+
+      proctitle_set ("gvmd: --rebuild-scap");
+
+      if (option_lock (&lockfile_checking))
+        return EXIT_FAILURE;
+
+      ret = manage_rebuild_scap (log_config, database, rebuild_scap);
+      log_config_free ();
+      if (ret)
+        {
+          printf ("Failed to rebuild SCAP data.\n");
           return EXIT_FAILURE;
         }
       return EXIT_SUCCESS;

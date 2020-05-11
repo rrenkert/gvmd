@@ -4214,39 +4214,6 @@ update_scap_ovaldefs (int last_scap_update, int private)
 /* CERT and SCAP update. */
 
 /**
- * @brief Write start time to sync lock file.
- *
- * @param[in]  lockfile  Lock file.
- */
-static void
-write_sync_start (int lockfile)
-{
-  time_t now;
-  char *now_string;
-
-  now = time (NULL);
-  now_string = ctime (&now);
-  while (*now_string)
-    {
-      ssize_t count;
-      count = write (lockfile,
-                     now_string,
-                     strlen (now_string));
-      if (count < 0)
-        {
-          if (errno == EAGAIN || errno == EINTR)
-            /* Interrupted, try write again. */
-            continue;
-          g_warning ("%s: failed to write to lockfile: %s",
-                     __func__,
-                     strerror (errno));
-          break;
-        }
-      now_string += count;
-    }
-}
-
-/**
  * @brief Reinit a db.
  *
  * @param[in]  name  Name of db.
@@ -4271,19 +4238,22 @@ manage_db_reinit (const gchar *name)
  * @param[in]  sigmask_current    Sigmask to restore in child.
  * @param[in]  update             Function to do the sync.
  * @param[in]  process_title      Process title.
- * @param[in]  lockfile_basename  Basename for lockfile.
  */
 static void
-sync_secinfo (sigset_t *sigmask_current, int (*update) (int),
-              const gchar *process_title, const gchar *lockfile_basename)
+sync_secinfo (sigset_t *sigmask_current, int (*update) (void),
+              const gchar *process_title)
 {
-  int pid, lockfile;
-  gchar *lockfile_name;
+  int pid, ret;
+  lockfile_t lockfile;
 
   /* Fork a child to sync the db, so that the parent can return to the main
    * loop. */
 
-  pid = fork ();
+  /* Use the default termination handlers for the child, because sync_secinfo
+   * is called from the main process (via manage_schedule).  The signal
+   * handlers inherited from the main process would not work because they
+   * need the process to watch termination_signal. */
+  pid = fork_with_handlers ();
   switch (pid)
     {
       case 0:
@@ -4299,30 +4269,12 @@ sync_secinfo (sigset_t *sigmask_current, int (*update) (int),
 
         /* Open the lock file. */
 
-        lockfile_name = g_build_filename (g_get_tmp_dir (), lockfile_basename,
-                                          NULL);
+        ret = feed_lockfile_lock (&lockfile);
 
-        lockfile = open (lockfile_name,
-                         O_RDWR | O_CREAT | O_APPEND,
-                         /* "-rw-r--r--" */
-                         S_IWUSR | S_IRUSR | S_IROTH | S_IRGRP);
-        if (lockfile == -1)
-          {
-            g_warning ("%s: failed to open lock file '%s': %s", __func__,
-                       lockfile_name, strerror (errno));
-            g_free (lockfile_name);
-            exit (EXIT_FAILURE);
-          }
-
-        if (flock (lockfile, LOCK_EX | LOCK_NB))  /* Exclusive, Non blocking. */
-          {
-            if (errno == EWOULDBLOCK)
-              g_debug ("%s: skipping, sync in progress", __func__);
-            else
-              g_debug ("%s: flock: %s", __func__, strerror (errno));
-            g_free (lockfile_name);
-            exit (EXIT_SUCCESS);
-          }
+        if (ret == 1)
+          exit (EXIT_SUCCESS);
+        else if (ret)
+          exit (EXIT_FAILURE);
 
         /* Init. */
 
@@ -4344,22 +4296,14 @@ sync_secinfo (sigset_t *sigmask_current, int (*update) (int),
 
   proctitle_set (process_title);
 
-  if (update (lockfile) == 0)
+  if (update () == 0)
     {
       check_alerts ();
     }
 
   /* Close the lock file. */
 
-  if (close (lockfile))
-    {
-      g_free (lockfile_name);
-      g_warning ("%s: failed to close lock file: %s", __func__,
-                 strerror (errno));
-      exit (EXIT_FAILURE);
-    }
-
-  g_free (lockfile_name);
+  feed_lockfile_unlock (&lockfile);
 
   exit (EXIT_SUCCESS);
 }
@@ -4566,12 +4510,10 @@ update_cvss_cert_bund (int updated_cert_bund, int last_cert_update,
 /**
  * @brief Sync the CERT DB.
  *
- * @param[in]  lockfile  Lock file.
- *
  * @return 0 success, -1 error.
  */
 static int
-sync_cert (int lockfile)
+sync_cert ()
 {
   int last_feed_update, last_cert_update, last_scap_update, updated_dfn_cert;
   int updated_cert_bund;
@@ -4618,8 +4560,6 @@ sync_cert (int lockfile)
 
   g_debug ("%s: sync", __func__);
 
-  write_sync_start (lockfile);
-
   manage_db_check_mode ("cert");
 
   if (manage_db_check ("cert"))
@@ -4634,28 +4574,19 @@ sync_cert (int lockfile)
         }
     }
 
-  if (manage_update_cert_db_init ())
-    goto fail;
-
   g_info ("%s: Updating data from feed", __func__);
 
   g_debug ("%s: update dfn", __func__);
 
   updated_dfn_cert = update_dfn_cert_advisories (last_cert_update);
   if (updated_dfn_cert == -1)
-    {
-      manage_update_cert_db_cleanup ();
-      goto fail;
-    }
+    goto fail;
 
   g_debug ("%s: update bund", __func__);
 
   updated_cert_bund = update_cert_bund_advisories (last_cert_update);
   if (updated_cert_bund == -1)
-    {
-      manage_update_cert_db_cleanup ();
-      goto fail;
-    }
+    goto fail;
 
   g_debug ("%s: update cvss", __func__);
 
@@ -4672,32 +4603,13 @@ sync_cert (int lockfile)
   g_debug ("%s: update timestamp", __func__);
 
   if (update_cert_timestamp ())
-    {
-      manage_update_cert_db_cleanup ();
-      goto fail;
-    }
+    goto fail;
 
   g_info ("%s: Updating CERT info succeeded.", __func__);
-
-  manage_update_cert_db_cleanup ();
-
-  /* Clear date from lock file. */
-
-  if (ftruncate (lockfile, 0))
-    g_warning ("%s: failed to ftruncate lockfile: %s",
-               __func__,
-               strerror (errno));
 
   return 0;
 
  fail:
-  /* Clear date from lock file. */
-
-  if (ftruncate (lockfile, 0))
-    g_warning ("%s: failed to ftruncate lockfile: %s",
-               __func__,
-               strerror (errno));
-
   return -1;
 }
 
@@ -4711,8 +4623,7 @@ manage_sync_cert (sigset_t *sigmask_current)
 {
   sync_secinfo (sigmask_current,
                 sync_cert,
-                "gvmd: Syncing CERT",
-                "gvm-sync-cert");
+                "gvmd: Syncing CERT");
 }
 
 
@@ -4887,17 +4798,29 @@ update_scap_placeholders (int updated_cves)
 }
 
 /**
- * @brief Sync the SCAP DB.
+ * @brief Update data in the SCAP DB.
  *
- * @param[in]  lockfile  Lock file.
+ * Currently only works correctly with all data or OVAL definitions.
+ *
+ * @param[in]  ignore_last_scap_update  Whether to ignore the last update time.
+ * @param[in]  update_cpes              Whether to update CPEs.
+ * @param[in]  update_cves              Whether to update CVEs.
+ * @param[in]  update_ovaldefs          Whether to update OVAL definitions.
  *
  * @return 0 success, -1 error.
  */
 static int
-sync_scap (int lockfile)
+update_scap (gboolean ignore_last_scap_update,
+             gboolean update_cpes,
+             gboolean update_cves,
+             gboolean update_ovaldefs)
 {
   int last_feed_update, last_scap_update;
   int updated_scap_ovaldefs, updated_scap_cpes, updated_scap_cves;
+
+  updated_scap_ovaldefs = 0;
+  updated_scap_cpes = 0;
+  updated_scap_cves = 0;
 
   if (manage_scap_db_exists ())
     {
@@ -4915,8 +4838,11 @@ sync_scap (int lockfile)
         }
     }
 
-  last_scap_update = -1;
-  if (manage_scap_loaded ())
+  if (manage_scap_loaded () == 0)
+    last_scap_update = -1;
+  else if (ignore_last_scap_update)
+    last_scap_update = 0;
+  else
     last_scap_update = sql_int ("SELECT coalesce ((SELECT value FROM scap.meta"
                                 "                  WHERE name = 'last_update'),"
                                 "                 '-1');");
@@ -4942,8 +4868,6 @@ sync_scap (int lockfile)
 
   g_debug ("%s: sync", __func__);
 
-  write_sync_start (lockfile);
-
   manage_db_check_mode ("scap");
 
   if (manage_db_check ("scap"))
@@ -4958,56 +4882,50 @@ sync_scap (int lockfile)
         }
     }
 
-  if (manage_update_scap_db_init ())
-     goto fail;
-
   g_info ("%s: Updating data from feed", __func__);
 
-  g_debug ("%s: update cpes", __func__);
-  proctitle_set ("gvmd: Syncing SCAP: Updating CPEs");
-
-  updated_scap_cpes = update_scap_cpes (last_scap_update);
-  if (updated_scap_cpes == -1)
+  if (update_cpes)
     {
-      manage_update_scap_db_cleanup ();
-      goto fail;
-    }
+      g_debug ("%s: update cpes", __func__);
+      proctitle_set ("gvmd: Syncing SCAP: Updating CPEs");
 
-  g_debug ("%s: update cves", __func__);
-  proctitle_set ("gvmd: Syncing SCAP: Updating CVEs");
-
-  updated_scap_cves = update_scap_cves (last_scap_update);
-  if (updated_scap_cves == -1)
-    {
-      manage_update_scap_db_cleanup ();
-      goto fail;
-    }
-
-  g_debug ("%s: update ovaldefs", __func__);
-  proctitle_set ("gvmd: Syncing SCAP: Updating OVALdefs");
-
-  updated_scap_ovaldefs = update_scap_ovaldefs (last_scap_update,
-                                                0 /* Feed data. */);
-  if (updated_scap_ovaldefs == -1)
-    {
-      manage_update_scap_db_cleanup ();
-      goto fail;
-    }
-
-  g_debug ("%s: updating user defined data", __func__);
-  proctitle_set ("gvmd: Syncing SCAP: Updating private OVALdefs");
-
-  switch (update_scap_ovaldefs (last_scap_update,
-                                1 /* Private data. */))
-    {
-      case 0:
-        break;
-      case -1:
-        manage_update_scap_db_cleanup ();
+      updated_scap_cpes = update_scap_cpes (last_scap_update);
+      if (updated_scap_cpes == -1)
         goto fail;
-      default:
-        updated_scap_ovaldefs = 1;
-        break;
+    }
+
+  if (update_cves)
+    {
+      g_debug ("%s: update cves", __func__);
+      proctitle_set ("gvmd: Syncing SCAP: Updating CVEs");
+
+      updated_scap_cves = update_scap_cves (last_scap_update);
+      if (updated_scap_cves == -1)
+        goto fail;
+    }
+
+  if (update_ovaldefs)
+    {
+      g_debug ("%s: update ovaldefs", __func__);
+      proctitle_set ("gvmd: Syncing SCAP: Updating OVALdefs");
+
+      updated_scap_ovaldefs =
+        update_scap_ovaldefs (last_scap_update, 0 /* Feed data. */);
+      if (updated_scap_ovaldefs == -1)
+        goto fail;
+
+      g_debug ("%s: updating user defined data", __func__);
+
+      switch (update_scap_ovaldefs (last_scap_update, 1 /* Private data. */))
+        {
+        case 0:
+          break;
+        case -1:
+          goto fail;
+        default:
+          updated_scap_ovaldefs = 1;
+          break;
+        }
     }
 
   g_debug ("%s: update max cvss", __func__);
@@ -5024,34 +4942,29 @@ sync_scap (int lockfile)
   g_debug ("%s: update timestamp", __func__);
 
   if (update_scap_timestamp ())
-    {
-      manage_update_scap_db_cleanup ();
-      goto fail;
-    }
+    goto fail;
 
   g_info ("%s: Updating SCAP info succeeded", __func__);
   proctitle_set ("gvmd: Syncing SCAP: done");
 
-  manage_update_scap_db_cleanup ();
-
-  /* Clear date from lock file. */
-
-  if (ftruncate (lockfile, 0))
-    g_warning ("%s: failed to ftruncate lockfile: %s",
-               __func__,
-               strerror (errno));
-
   return 0;
 
  fail:
-  /* Clear date from lock file. */
-
-  if (ftruncate (lockfile, 0))
-    g_warning ("%s: failed to ftruncate lockfile: %s",
-               __func__,
-               strerror (errno));
-
   return -1;
+}
+
+/**
+ * @brief Sync the SCAP DB.
+ *
+ * @return 0 success, -1 error.
+ */
+static int
+sync_scap ()
+{
+  return update_scap (FALSE, /* ignore_last_scap_update */
+                      TRUE,  /* update_cpes */
+                      TRUE,  /* update_cves */
+                      TRUE   /* update_ovaldefs */);
 }
 
 /**
@@ -5064,8 +4977,113 @@ manage_sync_scap (sigset_t *sigmask_current)
 {
   sync_secinfo (sigmask_current,
                 sync_scap,
-                "gvmd: Syncing SCAP",
-                "gvm-sync-scap");
+                "gvmd: Syncing SCAP");
+}
+
+/**
+ * @brief Rebuild part of the SCAP DB.
+ *
+ * @param[in]  type        The type of SCAP info to rebuild.
+ *
+ * @return 0 success, 1 invalid type, 2 sync running, -1 error
+ */
+static int
+rebuild_scap (const char *type)
+{
+  int ret = -1;
+  lockfile_t lockfile;
+
+  ret = feed_lockfile_lock (&lockfile);
+  if (ret == 1)
+    return 2;
+  else if (ret)
+    return -1;
+
+  if (strcasecmp (type, "ovaldefs") == 0
+      || strcasecmp (type, "ovaldef") == 0)
+    {
+      g_debug ("%s: rebuilding ovaldefs", __func__);
+      sql ("DELETE FROM ovalfiles");
+      sql ("DELETE FROM affected_ovaldefs");
+      sql ("DELETE FROM ovaldefs");
+
+      ret = update_scap (TRUE,  /* ignore_last_scap_update */
+                         FALSE, /* update_cpes */
+                         FALSE, /* update_cves */
+                         TRUE   /* update_ovaldefs */);
+      if (ret == 1)
+        ret = 2;
+    }
+  else
+    ret = 1;
+
+  if (feed_lockfile_unlock (&lockfile))
+    {
+      g_warning (
+        "%s: failed to close lock file: %s", __func__, strerror (errno));
+      return -1;
+    }
+
+  return ret;
+}
+
+/**
+ * @brief Rebuild part of the SCAP DB.
+ *
+ * @param[in]  log_config  Log configuration.
+ * @param[in]  database    Location of manage database.
+ * @param[in]  type        The type of SCAP info to rebuild.
+
+ * @return 0 success, -1 error.
+ */
+int
+manage_rebuild_scap (GSList *log_config, const gchar *database,
+                     const char *type)
+{
+  int ret;
+
+  g_info ("   Rebuilding SCAP data (%s).", type);
+
+  ret = manage_option_setup (log_config, database);
+  if (ret)
+    return -1;
+
+  if (manage_scap_db_exists ())
+    {
+      if (check_scap_db_version ())
+        goto fail;
+    }
+  else
+    {
+      g_info ("%s: Initializing SCAP database", __func__);
+
+      if (manage_db_init ("scap"))
+        {
+          g_warning ("%s: Could not initialize SCAP database", __func__);
+          goto fail;
+        }
+    }
+
+  ret = rebuild_scap (type);
+  if (ret == 1)
+    {
+      printf ("Type must be 'ovaldefs'.\n");
+      goto fail;
+    }
+  else if (ret == 2)
+    {
+      printf ("SCAP sync is currently running.\n");
+      goto fail;
+    }
+  else if (ret)
+    goto fail;
+
+  manage_option_cleanup ();
+  return 0;
+
+fail:
+  manage_option_cleanup ();
+  return -1;
 }
 
 /**

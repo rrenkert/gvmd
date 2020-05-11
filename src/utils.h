@@ -68,6 +68,9 @@ int
 lockfile_lock_nb (lockfile_t *, const gchar *);
 
 int
+lockfile_lock_path_nb (lockfile_t *, const gchar *);
+
+int
 lockfile_lock_shared_nb (lockfile_t *, const gchar *);
 
 int
@@ -81,5 +84,14 @@ is_uuid (const char *);
 
 int
 parse_xml_file (const gchar *, entity_t *);
+
+void
+setup_signal_handler (int, void (*) (int), int);
+
+void
+setup_signal_handler_info (int, void (*) (int, siginfo_t *, void *), int);
+
+int
+fork_with_handlers ();
 
 #endif /* not _GVMD_UTILS_H */

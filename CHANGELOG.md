@@ -27,7 +27,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Lock a file around the NVT sync [#1002](https://github.com/greenbone/gvmd/pull/1002)
 - Add a delay for re-requesting scan information via osp [#1012](https://github.com/greenbone/gvmd/pull/1012)
 - Add --optimize option cleanup-result-encoding [#1013](https://github.com/greenbone/gvmd/pull/1013)
-- Perform integrity check of VTs after updates [#1024](https://github.com/greenbone/gvmd/pull/1024)
+- Perform integrity check of VTs after updates [#1024](https://github.com/greenbone/gvmd/pull/1024) [#1035](https://github.com/greenbone/gvmd/pull/1035)
+- Ensure path of listening UNIX socket exists [#1040](https://github.com/greenbone/gvmd/pull/1040)
+- Add --rebuild-scap option [#1051](https://github.com/greenbone/gvmd/pull/1051)
+- Stop current scheduling of task when permission denied [#1058](https://github.com/greenbone/gvmd/pull/1058)
 
 ### Changed
 - Update SCAP and CERT feed info in sync scripts [#810](https://github.com/greenbone/gvmd/pull/810)
@@ -45,6 +48,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - New Community Feed download URL in sync tools [#982](https://github.com/greenbone/gvmd/pull/982)
 - Change setting UUID to correct length [#1018](https://github.com/greenbone/gvmd/pull/1018)
 - Change licence to AGPL-3.0-or-later [#1026](https://github.com/greenbone/gvmd/pull/1026)
+- Count only best OS matches for OS asset hosts [#1029](https://github.com/greenbone/gvmd/pull/1029)
+- Clean up NVTs set to name in cleanup-result-nvts [#1039](https://github.com/greenbone/gvmd/pull/1039)
+- Improve validation of note and override ports [#1045](https://github.com/greenbone/gvmd/pull/1045)
+- The internal list of current Local Security Checks for the Auto-FP feature was updated [#1054](https://github.com/greenbone/gvmd/pull/1054)
+- Simplify sync lockfile handling [#1059](https://github.com/greenbone/gvmd/pull/1059)
+- Do not ignore empty hosts_allow and ifaces_allow [#1064](https://github.com/greenbone/gvmd/pull/1064)
 
 ### Fixed
 - Add NULL check in nvts_feed_version_epoch [#768](https://github.com/greenbone/gvmd/pull/768)
@@ -91,6 +100,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Ensure parent exists when moving report format dir [#1019](https://github.com/greenbone/gvmd/pull/1019)
 - Use nvti_qod instead of the old nvti_get_tag() [#1022](https://github.com/greenbone/gvmd/pull/1022)
 - Remove active clause when filtering resources by tag [#1025](https://github.com/greenbone/gvmd/pull/1025)
+- Add user limits on hosts and ifaces to OSP prefs [#1033](https://github.com/greenbone/gvmd/pull/1033)
+- Fix order of tar options in gvm-lsc-deb-creator.sh [#1034](https://github.com/greenbone/gvmd/pull/1034)
+- Fix handling of termination signals [#1034](https://github.com/greenbone/gvmd/pull/1034)
+- Remove db init warning that no longer makes sense [#1044](https://github.com/greenbone/gvmd/pull/1044)
+- Use correct elements to get task ID in wizards [#1004](https://github.com/greenbone/gvmd/pull/1004) [#1046](https://github.com/greenbone/gvmd/pull/1046)
+- Use current row for iterator_null, instead of first row [#1047](https://github.com/greenbone/gvmd/pull/1047)
+- Setup general task preferences to launch an osp openvas task. [#1055](https://github.com/greenbone/gvmd/pull/1055)
+- Fix doc of get_tasks in GMP doc [#1066](https://github.com/greenbone/gvmd/pull/1066)
+- Improve refs and error handling in NVTs update [#1067](https://github.com/greenbone/gvmd/pull/1067)
 
 ### Removed
 - Remove support for "All SecInfo": removal of "allinfo" for type in get_info [#790](https://github.com/greenbone/gvmd/pull/790)
@@ -100,6 +118,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Removed migration tool "gvm-migrate-to-postgres" including the man page [#905](https://github.com/greenbone/gvmd/pull/905)
 - Remove agents [#922](https://github.com/greenbone/gvmd/pull/922)
 - Remove GMP COMMANDS [#923](https://github.com/greenbone/gvmd/pull/923)
+- Remove unused port names facility [#1041](https://github.com/greenbone/gvmd/pull/1041)
 
 [20.4]: https://github.com/greenbone/gvmd/compare/v9.0.0...master
 
